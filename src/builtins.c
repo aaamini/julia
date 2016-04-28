@@ -201,14 +201,27 @@ JL_DLLEXPORT void jl_enter_handler(jl_handler_t *eh)
     eh->gc_state = jl_gc_state();
     eh->locks_len = jl_current_task->locks.len;
 #endif
+    eh->defer_signal = jl_get_ptls_states()->defer_signal;
     jl_current_task->eh = eh;
 }
 
 JL_DLLEXPORT void jl_pop_handler(int n)
 {
+    if (__unlikely(n <= 0))
+        return;
+    sig_atomic_t old_defer_signal = jl_get_ptls_states()->defer_signal;
+    int8_t old_gc_state = jl_get_ptls_states()->gc_state;
+    jl_handler_t *eh = NULL;
     while (n > 0) {
-        jl_eh_restore_state(jl_current_task->eh);
+        eh = jl_current_task->eh;
+        jl_eh_restore_state_(eh);
         n--;
+    }
+    if (old_gc_state && !eh->gc_state) {
+        jl_gc_safepoint();
+    }
+    if (old_defer_signal && !eh->defer_signal) {
+        jl_sigint_safepoint();
     }
 }
 
