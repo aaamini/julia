@@ -1653,9 +1653,7 @@ void RTDyldMemoryManagerUnix::registerEHFrames(uint8_t *Addr,
     di->start_ip = start_ip;
     di->end_ip = end_ip;
 
-    JL_SIGATOMIC_BEGIN();
     _U_dyn_register(di);
-    JL_SIGATOMIC_END();
 }
 
 void RTDyldMemoryManagerUnix::deregisterEHFrames(uint8_t *Addr,

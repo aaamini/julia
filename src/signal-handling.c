@@ -23,17 +23,10 @@ static const    uint64_t GIGA = 1000000000ULL;
 JL_DLLEXPORT void jl_profile_stop_timer(void);
 JL_DLLEXPORT int jl_profile_start_timer(void);
 
-volatile sig_atomic_t jl_signal_pending = 0;
-volatile sig_atomic_t jl_defer_signal = 0;
-
-int exit_on_sigint = 0;
-JL_DLLEXPORT void jl_exit_on_sigint(int on) {exit_on_sigint = on;}
-
-// what to do on SIGINT
-JL_DLLEXPORT void jl_sigint_action(void)
+static int exit_on_sigint = 0;
+JL_DLLEXPORT void jl_exit_on_sigint(int on)
 {
-    if (exit_on_sigint) jl_exit(130); // 128+SIGINT
-    jl_throw(jl_interrupt_exception);
+    exit_on_sigint = on;
 }
 
 #if defined(_WIN32)

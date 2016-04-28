@@ -38,7 +38,6 @@ unsigned sig_stack_size = SIGSTKSZ;
 #endif
 
 static pthread_t signals_thread;
-static volatile int remote_sig;
 
 static int is_addr_on_stack(jl_tls_states_t *ptls, void *addr)
 {
@@ -89,13 +88,22 @@ static void segv_handler(int sig, siginfo_t *info, void *context)
 {
     assert(sig == SIGSEGV || sig == SIGBUS);
 
-#ifdef JULIA_ENABLE_THREADING
     if (jl_addr_is_safepoint((uintptr_t)info->si_addr)) {
         jl_unblock_signal(sig);
+#ifdef JULIA_ENABLE_THREADING
         jl_set_gc_and_wait();
+        // Do not raise sigint on worker thread
+        if (ti_tid != 0)
+            return;
+#endif
+        if (jl_get_ptls_states()->defer_signal) {
+            jl_safepoint_defer_sigint();
+        }
+        else if (jl_safepoint_consume_sigint()) {
+            jl_throw(jl_interrupt_exception);
+        }
         return;
     }
-#endif
     if (jl_safe_restore || is_addr_on_stack(jl_get_ptls_states(), info->si_addr)) { // stack overflow, or restarting jl_
         jl_unblock_signal(sig);
         jl_throw(jl_stackovf_exception);
@@ -136,10 +144,9 @@ static pthread_mutex_t in_signal_lock;
 static pthread_cond_t exit_signal_cond;
 static pthread_cond_t signal_caught_cond;
 
-static void jl_thread_suspend_and_get_state(int tid, unw_context_t **ctx, int sig)
+static void jl_thread_suspend_and_get_state(int tid, unw_context_t **ctx)
 {
     pthread_mutex_lock(&in_signal_lock);
-    remote_sig = sig;
     waiting_for = tid;
     pthread_kill(jl_all_task_states[tid].system_id, SIGUSR2);
     pthread_cond_wait(&signal_caught_cond, &in_signal_lock);  // wait for thread to acknowledge
@@ -150,14 +157,12 @@ static void jl_thread_suspend_and_get_state(int tid, unw_context_t **ctx, int si
 static void jl_thread_resume(int tid, int sig)
 {
     (void)sig;
-    remote_sig = 0;
     waiting_for = tid;
     pthread_cond_broadcast(&exit_signal_cond);
     pthread_cond_wait(&signal_caught_cond, &in_signal_lock); // wait for thread to acknowledge
     assert(waiting_for == 0);
     pthread_mutex_unlock(&in_signal_lock);
 }
-
 
 static inline void wait_barrier(void)
 {
@@ -171,11 +176,11 @@ static inline void wait_barrier(void)
         waiting_for = 0;
     }
 }
+
 void usr2_handler(int sig, siginfo_t *info, void *ctx)
 {
     ucontext_t *context = (ucontext_t*)ctx;
-    if ((remote_sig > 0 && waiting_for < 0) || waiting_for == ti_tid) {
-        int realsig = remote_sig;
+    if (waiting_for < 0 || waiting_for == ti_tid) {
 #ifdef __APPLE__
         signal_context = (unw_context_t*)&context->uc_mcontext->__ss;
 #else
@@ -187,17 +192,6 @@ void usr2_handler(int sig, siginfo_t *info, void *ctx)
         pthread_cond_wait(&exit_signal_cond, &in_signal_lock);
         wait_barrier();
         pthread_mutex_unlock(&in_signal_lock);
-
-        if (ti_tid == 0 && realsig == SIGINT) {
-            if (jl_defer_signal) {
-                jl_signal_pending = realsig;
-            }
-            else {
-                jl_signal_pending = 0;
-                jl_unblock_signal(sig);
-                jl_throw(jl_interrupt_exception);
-            }
-        }
     }
 }
 
@@ -351,8 +345,19 @@ static void *signal_listener(void *arg)
         profile = (sig == SIGUSR1);
 #  endif
 #endif
+        if (sig == SIGINT) {
+            if (exit_on_sigint) {
+                critical = 1;
+            }
+            else {
+                jl_safepoint_enable_sigint();
+                continue;
+            }
+        }
+        else {
+            critical = 0;
+        }
 
-        critical = (sig == SIGINT && exit_on_sigint);
         critical |= (sig == SIGTERM);
         critical |= (sig == SIGABRT);
         critical |= (sig == SIGQUIT);
@@ -367,7 +372,7 @@ static void *signal_listener(void *arg)
         // (so that thread zero gets notified last)
         for (i = jl_n_threads; i-- > 0; ) {
             // notify thread to stop
-            jl_thread_suspend_and_get_state(i, &signal_context, sig);
+            jl_thread_suspend_and_get_state(i, &signal_context);
 
             // do backtrace on thread contexts for critical signals
             // this part must be signal-handler safe
