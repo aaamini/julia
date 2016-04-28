@@ -23,6 +23,30 @@ static const    uint64_t GIGA = 1000000000ULL;
 JL_DLLEXPORT void jl_profile_stop_timer(void);
 JL_DLLEXPORT int jl_profile_start_timer(void);
 
+static uint64_t jl_last_sigint_trigger = 0;
+static void jl_clear_force_sigint(void)
+{
+    jl_last_sigint_trigger = 0;
+}
+
+static int jl_check_force_sigint(void)
+{
+    static double accum_weight = 0;
+    uint64_t cur_time = uv_hrtime();
+    uint64_t dt = cur_time - jl_last_sigint_trigger;
+    uint64_t last_t = jl_last_sigint_trigger;
+    jl_last_sigint_trigger = cur_time;
+    if (last_t == 0) {
+        accum_weight = 0;
+        return 0;
+    }
+    double new_weight = accum_weight * exp(-(dt / 1e9)) + 0.3;
+    if (!isnormal(new_weight))
+        new_weight = 0;
+    accum_weight = new_weight;
+    return new_weight > 1;
+}
+
 static int exit_on_sigint = 0;
 JL_DLLEXPORT void jl_exit_on_sigint(int on)
 {

@@ -100,6 +100,7 @@ static void segv_handler(int sig, siginfo_t *info, void *context)
             jl_safepoint_defer_sigint();
         }
         else if (jl_safepoint_consume_sigint()) {
+            jl_clear_force_sigint();
             jl_throw(jl_interrupt_exception);
         }
         return;
@@ -139,7 +140,6 @@ static void allocate_segv_handler(void)
 }
 
 static unw_context_t *volatile signal_context;
-static volatile int waiting_for;
 static pthread_mutex_t in_signal_lock;
 static pthread_cond_t exit_signal_cond;
 static pthread_cond_t signal_caught_cond;
@@ -147,40 +147,36 @@ static pthread_cond_t signal_caught_cond;
 static void jl_thread_suspend_and_get_state(int tid, unw_context_t **ctx)
 {
     pthread_mutex_lock(&in_signal_lock);
-    waiting_for = tid;
+    jl_tls_states_t *ptls = jl_all_task_states[tid].ptls;
+    jl_atomic_store_release(&ptls->signal_request, 1);
     pthread_kill(jl_all_task_states[tid].system_id, SIGUSR2);
     pthread_cond_wait(&signal_caught_cond, &in_signal_lock);  // wait for thread to acknowledge
-    assert(waiting_for == 0);
+    assert(jl_atomic_load_acquire(&ptls->signal_request) == 0);
     *ctx = signal_context;
 }
 
 static void jl_thread_resume(int tid, int sig)
 {
     (void)sig;
-    waiting_for = tid;
+    jl_tls_states_t *ptls = jl_all_task_states[tid].ptls;
+    jl_atomic_store_release(&ptls->signal_request, 1);
     pthread_cond_broadcast(&exit_signal_cond);
     pthread_cond_wait(&signal_caught_cond, &in_signal_lock); // wait for thread to acknowledge
-    assert(waiting_for == 0);
+    assert(jl_atomic_load_acquire(&ptls->signal_request) == 0);
     pthread_mutex_unlock(&in_signal_lock);
 }
 
-static inline void wait_barrier(void)
-{
-    if (waiting_for < 0) {
-        if (jl_atomic_fetch_add(&waiting_for, 1) == -1) {
-            pthread_cond_broadcast(&signal_caught_cond);
-        }
-    }
-    else {
-        pthread_cond_broadcast(&signal_caught_cond);
-        waiting_for = 0;
-    }
-}
-
+// request:
+// 0: nothing
+// 1: get state
+// 2: force throw sigint
+// 3: throw sigint if `!defer_signal && io_wait`
 void usr2_handler(int sig, siginfo_t *info, void *ctx)
 {
     ucontext_t *context = (ucontext_t*)ctx;
-    if (waiting_for < 0 || waiting_for == ti_tid) {
+    jl_tls_states_t *ptls = jl_get_ptls_states();
+    sig_atomic_t request = jl_atomic_exchange(&ptls->signal_request, 0);
+    if (request == 1) {
 #ifdef __APPLE__
         signal_context = (unw_context_t*)&context->uc_mcontext->__ss;
 #else
@@ -188,10 +184,25 @@ void usr2_handler(int sig, siginfo_t *info, void *ctx)
 #endif
 
         pthread_mutex_lock(&in_signal_lock);
-        wait_barrier();
+        pthread_cond_broadcast(&signal_caught_cond);
         pthread_cond_wait(&exit_signal_cond, &in_signal_lock);
-        wait_barrier();
+        request = jl_atomic_exchange(&ptls->signal_request, 0);
+        assert(request == 1);
+        if (request)
+            pthread_cond_broadcast(&signal_caught_cond);
         pthread_mutex_unlock(&in_signal_lock);
+    }
+    else if (request == 2) {
+        jl_unblock_signal(sig);
+        jl_throw(jl_interrupt_exception);
+    }
+    else if (request == 3) {
+        if (!ptls->defer_signal && ptls->io_wait &&
+            jl_safepoint_consume_sigint()) {
+            jl_clear_force_sigint();
+            jl_unblock_signal(sig);
+            jl_throw(jl_interrupt_exception);
+        }
     }
 }
 
@@ -350,7 +361,19 @@ static void *signal_listener(void *arg)
                 critical = 1;
             }
             else {
+                jl_tls_states_t *ptls = jl_all_task_states[0].ptls;
+                if (jl_check_force_sigint() && jl_safepoint_consume_sigint()) {
+                    jl_safe_printf("WARNING: Force throwing a SIGINT\n");
+                    // Force a throw
+                    jl_clear_force_sigint();
+                    jl_atomic_store_release(&ptls->signal_request, 2);
+                    pthread_kill(jl_all_task_states[0].system_id, SIGUSR2);
+                    continue;
+                }
                 jl_safepoint_enable_sigint();
+                // abort `sleep`
+                jl_atomic_store_release(&ptls->signal_request, 3);
+                pthread_kill(jl_all_task_states[0].system_id, SIGUSR2);
                 continue;
             }
         }

@@ -60,6 +60,12 @@ typedef struct _jl_tls_states_t {
     size_t bt_size;
     // JL_MAX_BT_SIZE + 1 elements long
     uintptr_t *bt_data;
+    // Atomically set by the sender, reset by the handler.
+    volatile sig_atomic_t signal_request;
+    // Allow the sigint to be raised asynchronously
+    // this is limited to the few places we do synchronous IO
+    // we can make this more general (similar to defer_signal) if necessary
+    volatile sig_atomic_t io_wait;
 } jl_tls_states_t;
 
 #ifdef __MIC__

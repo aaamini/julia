@@ -64,6 +64,16 @@ void __cdecl crt_sig_handler(int sig, int num)
         signal(SIGINT, (void (__cdecl *)(int))crt_sig_handler);
         if (exit_on_sigint)
             jl_exit(130); // 128 + SIGINT
+        if (jl_check_force_sigint() && jl_safepoint_consume_sigint()) {
+            jl_safe_printf("WARNING: Force throwing a SIGINT\n");
+            jl_clear_force_sigint();
+            jl_throw(jl_interrupt_exception);
+        }
+        jl_tls_states_t *ptls = jl_get_ptls_states();
+        if (!ptls->defer_signal && ptls->io_wait) {
+            jl_clear_force_sigint();
+            jl_throw(jl_interrupt_exception);
+        }
         jl_safepoint_enable_sigint();
         break;
     default: // SIGSEGV, (SSIGTERM, IGILL)
@@ -107,6 +117,42 @@ void jl_throw_in_ctx(jl_value_t *excpt, CONTEXT *ctxThread, int bt)
 
 HANDLE hMainThread = INVALID_HANDLE_VALUE;
 
+static int jl_try_throw_sigint(int force)
+{
+    if ((DWORD)-1 == SuspendThread(hMainThread)) {
+        // error
+        jl_safe_printf("error: SuspendThread failed\n");
+        return 0;
+    }
+    CONTEXT ctxThread;
+    memset(&ctxThread, 0, sizeof(CONTEXT));
+    ctxThread.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+    if (!GetThreadContext(hMainThread, &ctxThread)) {
+        // error
+        jl_safe_printf("error: GetThreadContext failed\n");
+        return 0;
+    }
+    jl_tls_states_t *ptls = jl_all_task_states[0].ptls;
+    int thrown = 0;
+    if (force || (!ptls->defer_signal && ptls->io_wait)) {
+        jl_clear_force_sigint();
+        jl_throw_in_ctx(jl_interrupt_exception, &ctxThread, 1);
+        ctxThread.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+        if (!SetThreadContext(hMainThread, &ctxThread)) {
+            jl_safe_printf("error: SetThreadContext failed\n");
+            // error
+            return 0;
+        }
+        thrown = 1;
+    }
+    if ((DWORD)-1 == ResumeThread(hMainThread)) {
+        jl_safe_printf("error: ResumeThread failed\n");
+        // error
+        return 0;
+    }
+    return thrown;
+}
+
 static BOOL WINAPI sigint_handler(DWORD wsig) //This needs winapi types to guarantee __stdcall
 {
     int sig;
@@ -119,7 +165,13 @@ static BOOL WINAPI sigint_handler(DWORD wsig) //This needs winapi types to guara
     }
     if (exit_on_sigint)
         jl_exit(130); // 128 + SIGINT
-    jl_safepoint_enable_sigint();
+    if (jl_check_force_sigint() && jl_safepoint_consume_sigint()) {
+        jl_safe_printf("WARNING: Force throwing a SIGINT\n");
+        jl_try_throw_sigint(1);
+        return 1;
+    }
+    if (!jl_try_throw_sigint(0))
+        jl_safepoint_enable_sigint();
     return 1;
 }
 
@@ -146,6 +198,7 @@ static LONG WINAPI _exception_handler(struct _EXCEPTION_POINTERS *ExceptionInfo,
                         jl_safepoint_defer_sigint();
                     }
                     else if (jl_safepoint_consume_sigint()) {
+                        jl_clear_force_sigint();
                         jl_throw_in_ctx(jl_interrupt_exception,
                                         ExceptionInfo->ContextRecord, in_ctx);
                     }

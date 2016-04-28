@@ -198,6 +198,7 @@ kern_return_t catch_exception_raise(mach_port_t            exception_port,
             jl_safepoint_defer_sigint();
         }
         else if (jl_safepoint_consume_sigint()) {
+            jl_clear_force_sigint();
             jl_throw_in_thread(tid, thread, jl_interrupt_exception);
         }
         return KERN_SUCCESS;
