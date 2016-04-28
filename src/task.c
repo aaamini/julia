@@ -318,6 +318,8 @@ static void ctx_switch(jl_task_t *t, jl_jmp_buf *where)
             arraylist_new(locks, 0);
         }
 #endif
+        jl_current_task->defer_signal = jl_get_ptls_states()->defer_signal;
+        jl_get_ptls_states()->defer_signal = t->defer_signal;
 
         // restore task's current module, looking at parent tasks
         // if it hasn't set one.
@@ -584,6 +586,7 @@ JL_DLLEXPORT jl_task_t *jl_new_task(jl_function_t *start, size_t ssize)
 #ifdef JULIA_ENABLE_THREADING
     arraylist_new(&t->locks, 0);
 #endif
+    t->defer_signal = 0;
     return t;
 }
 
@@ -669,6 +672,7 @@ void jl_init_root_task(void *stack, size_t ssize)
 #ifdef JULIA_ENABLE_THREADING
     arraylist_new(&jl_current_task->locks, 0);
 #endif
+    jl_current_task->defer_signal = 0;
 
     jl_root_task = jl_current_task;
 

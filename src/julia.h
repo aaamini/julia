@@ -1381,6 +1381,7 @@ typedef struct _jl_handler_t {
 #ifdef JULIA_ENABLE_THREADING
     size_t locks_len;
 #endif
+    sig_atomic_t defer_signal;
 } jl_handler_t;
 
 typedef struct _jl_task_t {
@@ -1414,6 +1415,7 @@ typedef struct _jl_task_t {
     // This is statically initialized when the task is not holding any locks
     arraylist_t locks;
 #endif
+    sig_atomic_t defer_signal;
 } jl_task_t;
 
 typedef struct {
@@ -1479,9 +1481,13 @@ STATIC_INLINE void jl_eh_restore_state(jl_handler_t *eh)
         locks->len = eh->locks_len;
     }
 #endif
+    jl_get_ptls_states()->defer_signal = eh->defer_signal;
     // This should be the last since this can trigger a safepoint
     // that throws a SIGINT.
     jl_gc_state_save_and_set(eh->gc_state);
+    if (eh->defer_signal == 0) {
+        jl_sigint_safepoint();
+    }
 }
 
 JL_DLLEXPORT void jl_enter_handler(jl_handler_t *eh);
