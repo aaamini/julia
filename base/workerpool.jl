@@ -37,7 +37,15 @@ function remotecall_pool(rc_f, f, pool::WorkerPool, args...; kwargs...)
     # Find an active worker
     worker = 0
     while true
-        pool.count == 0 && throw(ErrorException("No active worker available in pool"))
+        if pool.count == 0
+            if pool === default_worker_pool()
+                # No workers, the master process is used as a worker
+                return 1
+            else
+                throw(ErrorException("No active worker available in pool"))
+            end
+        end
+
         worker = take!(pool.channel)
         if worker in procs()
             break

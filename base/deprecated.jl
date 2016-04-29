@@ -995,13 +995,8 @@ export call
 # and added to pmap.jl
 # pmap(f, c...) = pmap(default_worker_pool(), f, c...)
 
-function pmap(f, c...; kwargs...)
-    kwdict = merge(DEFAULT_PMAP_ARGS, AnyDict(kwargs))
-    validate_pmap_kwargs(kwdict, append!([:err_retry, :pids, :err_stop], PMAP_KW_NAMES))
-
-    err_retry = get(kwdict, :err_retry, nothing)
-    err_stop = get(kwdict, :err_stop, nothing)
-    pids = get(kwdict, :pids, nothing)
+function pmap(f, c...; err_retry=nothing, err_stop=nothing, pids=nothing, kwargs...)
+    kwargs = Dict{Symbol, Any}(kwargs)
 
     if err_retry != nothing
         depwarn("err_retry is deprecated, use pmap(retry(f), c...).", :pmap)
@@ -1020,13 +1015,11 @@ function pmap(f, c...; kwargs...)
     if err_stop != nothing
         depwarn("err_stop is deprecated, use pmap(f, c...; on_error = error_handling_func).", :pmap)
         if err_stop == false
-            kwdict[:on_error] = e->e
+            kwargs[:on_error] = e->e
         end
     end
 
-    pmap(p, f, c...; distributed=kwdict[:distributed],
-                     batch_size=kwdict[:batch_size],
-                     on_error=kwdict[:on_error])
+    pmap(p, f, c...; kwargs...)
 end
 
 

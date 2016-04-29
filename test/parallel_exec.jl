@@ -672,14 +672,16 @@ end
 
 # pmap tests. Needs at least 4 processors dedicated to the below tests. Which we currently have
 # since the parallel tests are now spawned as a separate set.
-s = "abcdefghijklmnopqrstuvwxyz";
+s = repeat("abcdefghijklmnopqrstuvwxyz", 10);
 ups = uppercase(s);
 
 unmangle_exception = e -> begin
-    if isa(e, CompositeException)
-        e = e.exceptions[1].ex
+    while (isa(e, CompositeException) || isa(e, RemoteException))
+        if isa(e, CompositeException)
+            e = e.exceptions[1].ex
+        end
         if isa(e, RemoteException)
-            e = e.captured.ex.exceptions[1].ex
+            e = e.captured.ex
         end
     end
     return e
@@ -689,11 +691,12 @@ errifeqa = x->(x=='a') ? error("foobar") : uppercase(x)
 
 errifeven = x->iseven(Int(x)) ? error("foobar") : uppercase(x)
 
-
 for (throws_err, mapf) in [ (true, map),
                             (true, asyncmap),
                             (true, pmap),
-                            (false, (f,c)->pmap(f, c; on_error = e->true))
+                            (false, (f,c)->pmap(f, c; on_error = e->e)),
+                            (true, (f,c)->pmap(f, c; distributed=false)),
+                            (true, (f,c)->pmap(f, c; batch_size=3))
                           ]
     @test ups == bytestring(UInt8[UInt8(c) for c in mapf(x->uppercase(x), s)])
     @test ups == bytestring(UInt8[UInt8(c) for c in mapf(x->uppercase(Char(x)), s.data)])
@@ -723,7 +726,10 @@ for (throws_err, mapf) in [ (true, map),
         @test length(res) == length(ups)
         for i in 1:length(s)
             if iseven(Int(s[i]))
-                @test res[i] == true
+                @test isa(res[i], Exception)
+                e = unmangle_exception(res[i])
+                @test isa(e, ErrorException)
+                @test e.msg == "foobar"
             else
                 @test res[i] == uppercase(s[i])
             end
