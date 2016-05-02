@@ -352,6 +352,7 @@ static Function *jlthrow_func;
 static Function *jlerror_func;
 static Function *jltypeerror_func;
 static Function *jlundefvarerror_func;
+static Function *jlmethoderror_func;
 static Function *jlboundserror_func;
 static Function *jluboundserror_func;
 static Function *jlvboundserror_func;
@@ -1094,16 +1095,15 @@ void *jl_get_llvmf(jl_tupletype_t *tt, bool getwrapper, bool getdeclarations)
     jl_lambda_info_t *linfo = NULL;
     JL_GC_PUSH2(&linfo, &tt);
     if (tt != NULL) {
-        linfo = jl_get_specialization1(tt);
+        linfo = jl_checked_specialization1(tt);
         if (linfo == NULL) {
             jl_typemap_entry_t *entry;
             linfo = jl_method_lookup_by_type(
                 ((jl_datatype_t*)jl_tparam0(tt))->name->mt, tt, 0, 0, &entry);
-            if (linfo == NULL) {
+            if (linfo == NULL || jl_has_call_ambiguities_(tt, linfo->def)) {
                 JL_GC_POP();
                 return NULL;
             }
-            check_ambig_call(linfo->def, tt);
         }
     }
     if (linfo == NULL) {
@@ -2687,6 +2687,21 @@ static jl_cgval_t emit_call_function_object(jl_lambda_info_t *li, const jl_cgval
                            expr_type(callexpr, ctx), ctx);
 }
 
+ static void emit_methoderror(jl_function_t *f, jl_value_t **args, size_t nargs, jl_codectx_t *ctx)
+{
+    jl_value_t *argtup = jl_f_tuple(NULL, args+1, nargs-1); // skip the function
+    JL_GC_PUSH1(&argtup);
+#ifdef LLVM37
+    builder.CreateCall(prepare_call(jlmethoderror_func), { literal_pointer_val((jl_value_t*)f), literal_pointer_val((jl_value_t*)argtup) });
+#else
+    builder.CreateCall2(prepare_call(jlmethoderror_func), literal_pointer_val((jl_value_t*)f), literal_pointer_val((jl_value_t*)argtup));
+#endif
+    builder.CreateUnreachable();
+    BasicBlock *cont = BasicBlock::Create(jl_LLVMContext,"after_error",ctx->f);
+    builder.SetInsertPoint(cont);
+    JL_GC_POP();
+}
+
 static jl_cgval_t emit_call(jl_expr_t *ex, jl_codectx_t *ctx)
 {
     jl_value_t *expr = (jl_value_t*)ex;
@@ -2738,30 +2753,37 @@ static jl_cgval_t emit_call(jl_expr_t *ex, jl_codectx_t *ctx)
                   jl_sprint(args[0]),
                   jl_sprint((jl_value_t*)aty));
               }*/
-            jl_lambda_info_t *li = jl_get_specialization1((jl_tupletype_t*)aty);
+            jl_typemap_entry_t *entry;
+            jl_lambda_info_t *li = jl_get_specialization1((jl_tupletype_t*)aty, &entry);
             if (li != NULL) {
-                assert(li->functionObjectsDecls.functionObject != NULL);
-                theFptr = (Value*)li->functionObjectsDecls.functionObject;
-                jl_cgval_t fval;
-                if (f != NULL) {
-                    // TODO jb/functions: avoid making too many roots here
-                    if (!jl_is_globalref(args[0]) && !jl_is_symbol(args[0]) &&
-                        !jl_is_leaf_type(f)) {
-                        if (ctx->linfo->def)
-                            jl_add_linfo_root(ctx->linfo, f);
-                        else // for toplevel thunks, just write the value back to the AST to root it
-                            jl_cellset(ex->args, 0, f);
-                    }
-                    fval = mark_julia_const((jl_value_t*)f);
+                jl_method_t *m = li->def;
+                if (jl_has_call_ambiguities_((jl_tupletype_t*)aty, m)) {
+                    emit_methoderror(f, args, arglen, ctx);
                 }
                 else {
-                    fval = emit_expr(args[0], ctx);
+                    assert(li->functionObjectsDecls.functionObject != NULL);
+                    theFptr = (Value*)li->functionObjectsDecls.functionObject;
+                    jl_cgval_t fval;
+                    if (f != NULL) {
+                        // TODO jb/functions: avoid making too many roots here
+                        if (!jl_is_globalref(args[0]) && !jl_is_symbol(args[0]) &&
+                            !jl_is_leaf_type(f)) {
+                            if (ctx->linfo->def)
+                                jl_add_linfo_root(ctx->linfo, f);
+                            else // for toplevel thunks, just write the value back to the AST to root it
+                                jl_cellset(ex->args, 0, f);
+                        }
+                        fval = mark_julia_const((jl_value_t*)f);
+                    }
+                    else {
+                        fval = emit_expr(args[0], ctx);
+                    }
+                    if (ctx->linfo->def) // root this li in case it gets deleted from the cache in `f`
+                        jl_add_linfo_root(ctx->linfo, (jl_value_t*)li);
+                    result = emit_call_function_object(li, fval, theFptr, args, nargs, expr, ctx);
+                    JL_GC_POP();
+                    return result;
                 }
-                if (ctx->linfo->def) // root this li in case it gets deleted from the cache in `f`
-                    jl_add_linfo_root(ctx->linfo, (jl_value_t*)li);
-                result = emit_call_function_object(li, fval, theFptr, args, nargs, expr, ctx);
-                JL_GC_POP();
-                return result;
             }
         }
     }
@@ -3520,7 +3542,7 @@ static Function *gen_cfun_wrapper(jl_function_t *ff, jl_value_t *jlrettype, jl_t
         jl_error("va_arg syntax not allowed for cfunction argument list");
 
     const char *name = "cfunction";
-    jl_lambda_info_t *lam = jl_get_specialization1((jl_tupletype_t*)sigt);
+    jl_lambda_info_t *lam = jl_checked_specialization1((jl_tupletype_t*)sigt);
     jl_value_t *astrt = (jl_value_t*)jl_any_type;
     if (lam != NULL) {
         name = jl_symbol_name(lam->def->name);
@@ -5197,6 +5219,16 @@ static void init_julia_llvm_env(Module *m)
                          "jl_undefined_var_error", m);
     jlundefvarerror_func->setDoesNotReturn();
     add_named_global(jlundefvarerror_func, &jl_undefined_var_error);
+
+    std::vector<Type*> args2_methoderror(0);
+    args2_methoderror.push_back(T_pjlvalue);
+    args2_methoderror.push_back(T_pjlvalue);
+    jlmethoderror_func =
+        Function::Create(FunctionType::get(T_void, args2_methoderror, false),
+                         Function::ExternalLinkage,
+                         "jl_method_error_bare", m);
+    jlmethoderror_func->setDoesNotReturn();
+    add_named_global(jlmethoderror_func, &jl_method_error_bare);
 
     std::vector<Type*> args2_boundserrorv(0);
     args2_boundserrorv.push_back(T_pjlvalue);
