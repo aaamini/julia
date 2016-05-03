@@ -17,6 +17,7 @@ export @test, @test_throws
 export @testset
 # Legacy approximate testing functions, yet to be included
 export @test_approx_eq, @test_approx_eq_eps, @inferred
+export detect_ambiguities
 
 #-----------------------------------------------------------------------
 
@@ -821,6 +822,46 @@ function test_approx_eq_modphase{S<:Real,T<:Real}(
         v1, v2 = a[:, i], b[:, i]
         @test_approx_eq_eps min(abs(norm(v1-v2)), abs(norm(v1+v2))) 0.0 err
     end
+end
+
+"""
+    detect_ambiguities(mod1, mod2...)
+
+Test for ambiguous pairs of methods among the listed modules. Returns
+an array-of-tuples, where each tuple is of the form
+`(func, file1, line1, file2, line2)`.
+"""
+function detect_ambiguities(mods...; imported::Bool=false)
+    function sortdefs(file1, line1, file2, line2)
+        ord12 = file1 < file2
+        if file1 == file2
+            ord12 = line1 < line2
+        end
+        ord12 ? (file1, line1, file2, line2) : (file2, line2, file1, line1)
+    end
+    ambs = Set{Tuple{Function,Symbol,Int,Symbol,Int}}()
+    for mod in mods
+        for n in names(mod, true, imported)
+            try
+                f = eval(mod, n)
+                if isa(f, Function)
+                    mt = methods(f)
+                    for m in mt
+                        if m.ambig != nothing
+                            for m2 in m.ambig
+                                if Base.isambiguous(m, m2)
+                                    push!(ambs, (f, sortdefs(m.file, m.line, m2.file, m2.line)...))
+                                end
+                            end
+                        end
+                    end
+                end
+            catch
+                println("Skipping ", mod, '.', n)  # typically stale exports
+            end
+        end
+    end
+    collect(ambs)
 end
 
 end # module
