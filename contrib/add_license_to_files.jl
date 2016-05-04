@@ -71,9 +71,8 @@ const old_license = ""
 ### END CONFIG HERE
 
 
-function check_lines!(
-    path::AbstractString, lines::Vector, checktxt::AbstractString,
-    prefix::AbstractString, oldcheck::Bool)
+function check_lines!(path::AbstractString, lines::Vector, checktxt::AbstractString,
+        prefix::AbstractString, oldcheck::Bool)
     remove = []
     for i in 1:length(lines)
         line = lines[i]
