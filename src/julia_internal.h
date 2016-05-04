@@ -638,6 +638,12 @@ jl_value_t *jl_lookup_match(jl_value_t *a, jl_value_t *b, jl_svec_t **penv, jl_s
 
 unsigned jl_special_vector_alignment(size_t nfields, jl_value_t *field_type);
 
+#ifdef _OS_WINDOWS_
+#define jl_debug_win32_sigint() jl_safe_printf("%d:%s\n", GetCurrentProcessId(), __func__);
+#else
+#define jl_debug_win32_sigint()
+#endif
+
 #ifdef __cplusplus
 }
 #endif

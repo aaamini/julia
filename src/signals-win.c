@@ -43,6 +43,7 @@ static char *strsignal(int sig)
 
 static void jl_try_throw_sigint(void)
 {
+    jl_debug_win32_sigint();
     jl_tls_states_t *ptls = jl_get_ptls_states();
     jl_safepoint_enable_sigint();
     jl_wake_libuv();
@@ -78,6 +79,7 @@ void __cdecl crt_sig_handler(int sig, int num)
         break;
     case SIGINT:
         signal(SIGINT, (void (__cdecl *)(int))crt_sig_handler);
+        jl_debug_win32_sigint();
         if (exit_on_sigint)
             jl_exit(130); // 128 + SIGINT
         jl_try_throw_sigint();
@@ -126,6 +128,7 @@ HANDLE hMainThread = INVALID_HANDLE_VALUE;
 // Try to throw the exception in the master thread.
 static void jl_try_deliver_sigint(void)
 {
+    jl_debug_win32_sigint();
     jl_tls_states_t *ptls = jl_all_task_states[0].ptls;
     jl_safepoint_enable_sigint();
     jl_wake_libuv();
@@ -166,6 +169,7 @@ static void jl_try_deliver_sigint(void)
 
 static BOOL WINAPI sigint_handler(DWORD wsig) //This needs winapi types to guarantee __stdcall
 {
+    jl_debug_win32_sigint();
     int sig;
     //windows signals use different numbers from unix (raise)
     switch(wsig) {
@@ -193,6 +197,7 @@ static LONG WINAPI _exception_handler(struct _EXCEPTION_POINTERS *ExceptionInfo,
                 return EXCEPTION_CONTINUE_EXECUTION;
             case EXCEPTION_ACCESS_VIOLATION:
                 if (jl_addr_is_safepoint(ExceptionInfo->ExceptionRecord->ExceptionInformation[1])) {
+                    jl_debug_win32_sigint();
 #ifdef JULIA_ENABLE_THREADING
                     jl_set_gc_and_wait();
                     // Do not raise sigint on worker thread
@@ -260,7 +265,9 @@ static LONG WINAPI _exception_handler(struct _EXCEPTION_POINTERS *ExceptionInfo,
                 jl_safe_printf("UNKNOWN"); break;
         }
         jl_safe_printf(" at 0x%Ix -- ", (size_t)ExceptionInfo->ExceptionRecord->ExceptionAddress);
-        jl_gdblookup((uintptr_t)ExceptionInfo->ExceptionRecord->ExceptionAddress);
+        jl_safe_printf(" safepoint_addr 0x%Ix -- ",
+                       (size_t)(uintptr_t)jl_safepoint_pages);
+        /* jl_gdblookup((uintptr_t)ExceptionInfo->ExceptionRecord->ExceptionAddress); */
 
         jl_critical_error(0, ExceptionInfo->ContextRecord, jl_bt_data, &jl_bt_size);
         static int recursion = 0;

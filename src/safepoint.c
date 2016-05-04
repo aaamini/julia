@@ -173,6 +173,7 @@ void jl_safepoint_wait_gc(void)
 
 void jl_safepoint_enable_sigint(void)
 {
+    jl_debug_win32_sigint();
     jl_mutex_lock_nogc(&safepoint_lock);
     // Make sure both safepoints are enabled exactly once for SIGINT.
     switch (jl_signal_pending) {
@@ -194,6 +195,7 @@ void jl_safepoint_enable_sigint(void)
 
 void jl_safepoint_defer_sigint(void)
 {
+    jl_debug_win32_sigint();
     jl_mutex_lock_nogc(&safepoint_lock);
     // Make sure the GC safepoint is disabled for SIGINT.
     if (jl_signal_pending == 2) {
@@ -205,6 +207,7 @@ void jl_safepoint_defer_sigint(void)
 
 int jl_safepoint_consume_sigint(void)
 {
+    jl_debug_win32_sigint();
     int has_signal = 0;
     jl_mutex_lock_nogc(&safepoint_lock);
     // Make sure both safepoints are disabled for SIGINT.

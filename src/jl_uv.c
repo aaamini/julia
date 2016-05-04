@@ -54,11 +54,13 @@ static void jl_signal_async_cb(uv_async_t *hdl)
     // This should abort the current loop and the julia code it returns to
     // or the safepoint in the callers of `uv_run` should throw the exception.
     (void)hdl;
+    jl_debug_win32_sigint();
     uv_stop(jl_io_loop);
 }
 
 void jl_wake_libuv(void)
 {
+    jl_debug_win32_sigint();
     uv_async_send(&signal_async);
 }
 
