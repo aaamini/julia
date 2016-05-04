@@ -828,18 +828,17 @@ end
     detect_ambiguities(mod1, mod2...)
 
 Test for ambiguous pairs of methods among the listed modules. Returns
-an array-of-tuples, where each tuple is of the form
-`(func, file1, line1, file2, line2)`.
+an array-of-`(Method,Method)` tuples.
 """
 function detect_ambiguities(mods...; imported::Bool=false)
-    function sortdefs(file1, line1, file2, line2)
-        ord12 = file1 < file2
-        if file1 == file2
-            ord12 = line1 < line2
+    function sortdefs(m1, m2)
+        ord12 = m1.file < m2.file
+        if !ord12 && (m1.file == m2.file)
+            ord12 = m1.line < m2.line
         end
-        ord12 ? (file1, line1, file2, line2) : (file2, line2, file1, line1)
+        ord12 ? (m1, m2) : (m2, m1)
     end
-    ambs = Set{Tuple{Function,Symbol,Int,Symbol,Int}}()
+    ambs = Set{Tuple{Method,Method}}()
     for mod in mods
         for n in names(mod, true, imported)
             try
@@ -850,7 +849,7 @@ function detect_ambiguities(mods...; imported::Bool=false)
                         if m.ambig != nothing
                             for m2 in m.ambig
                                 if Base.isambiguous(m, m2)
-                                    push!(ambs, (f, sortdefs(m.file, m.line, m2.file, m2.line)...))
+                                    push!(ambs, sortdefs(m, m2))
                                 end
                             end
                         end
